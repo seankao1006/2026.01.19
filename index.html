@@ -1,65 +1,208 @@
 <!DOCTYPE html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <title>Example SMART App</title>
-        <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
-        <style>
-            #patient, #meds {
-                font-family: Monaco, monospace;
-                white-space: pre;
-                font-size: 13px;
-                height: 30vh;
-                overflow: scroll;
-                border: 1px solid #CCC;
-            }
-        </style>
-    </head>
-    <body>
-        <h4>Current Patient</h4>
-        <div id="patient">Loading...</div>
-        <br/>
-        <h4>Medications</h4>
-        <div id="meds">Loading...</div>
-        <script type="text/javascript">
-            FHIR.oauth2.ready().then(function(client) {
-                
-                // Render the current patient (or any error)
-                client.patient.read().then(
-                    function(pt) {
-                        document.getElementById("patient").innerText = JSON.stringify(pt, null, 4);
-                    },
-                    function(error) {
-                        document.getElementById("patient").innerText = error.stack;
-                    }
-                );
-                
-                // Get MedicationRequests for the selected patient
-                client.request("/MedicationRequest?patient=" + client.patient.id, {
-                    resolveReferences: [ "medicationReference" ],
-                    graph: true
-                })
-                
-                // Reject if no MedicationRequests are found
-                .then(function(data) {
-                    if (!data.entry || !data.entry.length) {
-                        throw new Error("No medications found for the selected patient");
-                    }
-                    return data.entry;
-                })
-                
+  <head>
+    <meta charset="UTF-8" />
+    <title>Viral Load Tracker - SMART</title>
+    <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans";
+        margin: 16px;
+      }
+      .box {
+        font-family: Monaco, monospace;
+        white-space: pre;
+        font-size: 13px;
+        max-height: 28vh;
+        overflow: auto;
+        border: 1px solid #ccc;
+        padding: 12px;
+        border-radius: 8px;
+        background: #fafafa;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      th, td {
+        border-bottom: 1px solid #eee;
+        text-align: left;
+        padding: 10px 8px;
+        vertical-align: top;
+      }
+      th {
+        background: #f7f7f7;
+        position: sticky;
+        top: 0;
+        z-index: 1;
+      }
+      .muted { color: #666; }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border: 1px solid #ddd;
+        border-radius: 999px;
+        font-size: 12px;
+        background: #fff;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      @media (max-width: 900px) {
+        .row { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
 
-                // Render the current patient's medications (or any error)
-                .then(
-                    function(meds) {
-                        document.getElementById("meds").innerText = JSON.stringify(meds, null, 4);
-                    },
-                    function(error) {
-                        document.getElementById("meds").innerText = error.stack;
-                    }
-                );
+  <body>
+    <h3>Current Patient</h3>
+    <div id="patient" class="box">Loading...</div>
 
-            }).catch(console.error);
-        </script>
-    </body>
+    <h3 style="margin-top:16px;">Lab Results (Viral Load & CD4)</h3>
+    <div class="muted" style="margin: 6px 0 10px;">
+      Pulling Observations for the selected patient and showing only HIV Viral Load + CD4.
+    </div>
+
+    <div class="box" style="white-space: normal;">
+      <div id="summary" class="muted" style="margin-bottom:10px;">Loading...</div>
+      <div style="max-height: 45vh; overflow: auto; border: 1px solid #eee; border-radius: 8px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 140px;">Date</th>
+              <th>Test</th>
+              <th style="width: 220px;">Value</th>
+              <th style="width: 220px;">Notes</th>
+            </tr>
+          </thead>
+          <tbody id="results">
+            <tr><td colspan="4" class="muted">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <h3 style="margin-top:16px;">Raw Observations (debug)</h3>
+    <div id="raw" class="box">Loading...</div>
+
+    <script type="text/javascript">
+      // --- Helpers ---
+      function asArray(x) { return Array.isArray(x) ? x : (x ? [x] : []); }
+
+      function getCodingDisplay(codeable) {
+        if (!codeable) return "";
+        if (codeable.text) return codeable.text;
+        const c = asArray(codeable.coding)[0];
+        return c?.display || c?.code || "";
+      }
+
+      function formatDate(obs) {
+        // prefer effectiveDateTime; fallback issued
+        const d = obs.effectiveDateTime || obs.issued || "";
+        if (!d) return "";
+        // keep date only if ISO
+        return String(d).slice(0, 10);
+      }
+
+      function getObsValue(obs) {
+        // handle common value[x]
+        if (obs.valueQuantity) {
+          const v = obs.valueQuantity.value;
+          const unit = obs.valueQuantity.unit || "";
+          return `${v ?? ""} ${unit}`.trim();
+        }
+        if (obs.valueCodeableConcept) return getCodingDisplay(obs.valueCodeableConcept);
+        if (obs.valueString != null) return String(obs.valueString);
+        if (obs.valueInteger != null) return String(obs.valueInteger);
+        if (obs.valueBoolean != null) return String(obs.valueBoolean);
+        if (obs.valueDateTime != null) return String(obs.valueDateTime);
+        return "";
+      }
+
+      function getNotes(obs) {
+        const notes = asArray(obs.note).map(n => n?.text).filter(Boolean);
+        return notes.join(" | ");
+      }
+
+      // Filter for Viral Load + CD4 using LOINC codes
+      // Viral Load: 25836-8
+      // CD4 Count: 8123-2
+      function isViralLoadOrCD4(obs) {
+        const codings = asArray(obs.code?.coding);
+        return codings.some(c =>
+          c?.system === "http://loinc.org" &&
+          (c?.code === "25836-8" || c?.code === "8123-2")
+        );
+      }
+
+      function sortByDateDesc(a, b) {
+        const da = (a.effectiveDateTime || a.issued || "");
+        const db = (b.effectiveDateTime || b.issued || "");
+        return String(db).localeCompare(String(da));
+      }
+
+      // --- SMART App ---
+      FHIR.oauth2.ready().then(async function (client) {
+        // 1) Patient
+        try {
+          const pt = await client.patient.read();
+          document.getElementById("patient").innerText = JSON.stringify(pt, null, 2);
+        } catch (e) {
+          document.getElementById("patient").innerText = e?.stack || String(e);
+        }
+
+        // 2) Observations: lab + sort + pull all pages
+        // NOTE: do NOT use resolveReferences unless you truly need performer/encounter details.
+        const search = `Observation?patient=${client.patient.id}&category=laboratory&_sort=-date&_count=50`;
+
+        try {
+          // Use pageLimit + flat to get Observation[] directly (fhirclient.js supports this pattern)
+          const obsList = await client.request(search, { pageLimit: 0, flat: true });
+
+          // Debug raw output (limit to avoid huge 화면)
+          document.getElementById("raw").innerText = JSON.stringify(obsList.slice(0, 50), null, 2);
+
+          const filtered = obsList.filter(isViralLoadOrCD4).sort(sortByDateDesc);
+
+          const summary = document.getElementById("summary");
+          summary.innerHTML = `
+            Patient/<span class="pill">${client.patient.id}</span>
+            &nbsp;·&nbsp; Total lab Observations: <span class="pill">${obsList.length}</span>
+            &nbsp;·&nbsp; Viral Load / CD4: <span class="pill">${filtered.length}</span>
+          `;
+
+          const tbody = document.getElementById("results");
+          if (!filtered.length) {
+            tbody.innerHTML = `<tr><td colspan="4" class="muted">No Viral Load / CD4 observations found.</td></tr>`;
+            return;
+          }
+
+          tbody.innerHTML = filtered.map(obs => {
+            const date = formatDate(obs);
+            const test = getCodingDisplay(obs.code);
+            const value = getObsValue(obs);
+            const notes = getNotes(obs);
+
+            return `
+              <tr>
+                <td>${date || "<span class='muted'>(no date)</span>"}</td>
+                <td>${test || "<span class='muted'>(no code/text)</span>"}</td>
+                <td>${value || "<span class='muted'>(no value)</span>"}</td>
+                <td>${notes ? notes : "<span class='muted'>—</span>"}</td>
+              </tr>
+            `;
+          }).join("");
+
+        } catch (e) {
+          document.getElementById("summary").innerText = "Failed to load observations.";
+          document.getElementById("results").innerHTML =
+            `<tr><td colspan="4" style="color:#b00020;">${(e?.stack || String(e))}</td></tr>`;
+          document.getElementById("raw").innerText = e?.stack || String(e);
+        }
+      }).catch(console.error);
+    </script>
+  </body>
 </html>
